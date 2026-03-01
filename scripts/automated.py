@@ -13,30 +13,13 @@ Examples:
   python3 automated.py https://example.com /about
   python3 automated.py https://example.com /pricing --out /tmp/my-qa
 """
+import argparse
 import asyncio
 import json
 import os
 import re as _re
 import sys
 from datetime import datetime
-
-# ---------------------------------------------------------------------------
-# Configuration (from CLI args)
-# ---------------------------------------------------------------------------
-if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-    print(__doc__.strip())
-    sys.exit(0)
-
-BASE_URL = sys.argv[1].rstrip("/")
-PAGE_ROUTE = sys.argv[2] if len(sys.argv) >= 3 and not sys.argv[2].startswith("--") else "/"
-OUT = "/tmp/visual-qa"
-# Parse --out flag
-for i, arg in enumerate(sys.argv):
-    if arg == "--out" and i + 1 < len(sys.argv):
-        OUT = sys.argv[i + 1]
-os.makedirs(OUT, exist_ok=True)
-print(f"Target: {BASE_URL}{PAGE_ROUTE}")
-print(f"Output: {OUT}")
 
 DEVICES = [
     ("iPhone_SE", 375, 667),
@@ -62,6 +45,18 @@ CATEGORIES = {
 
 # Which parts trigger "FIX BEFORE PUBLISHING" on any FAIL
 CRITICAL_PARTS = {"part1", "part2", "part3", "part5"}
+
+# Page-specific selectors (adjust for different websites)
+SELECTORS = {
+    "nav_about_link": "nav a[href*='about'], nav a:has-text('About')",
+    "nav_logo": "nav a:has(img), nav a:has(svg)",
+    "contact_cta": "button:has-text('Contact'), a:has-text('Contact')",
+    "hamburger_btn": 'button[class*="lg:hidden"], button[aria-label="Toggle menu"], nav button[class*="menu"]',
+    "modal": "[role=dialog], [aria-modal=true], .fixed.inset-0, [class*=modal]",
+    "modal_close": "button:has-text('\u00d7'), button:has-text('Close'), button[aria-label*='close'], button[aria-label*='Close'], [role=dialog] button:first-of-type",
+    # JS-embedded: 15.2 looks for nav links with text containing 'Physical' or 'AI'
+}
+
 
 # Map check-id prefix to part key
 def _part_for(check_id: str) -> str:
@@ -312,44 +307,6 @@ def _px(val):
     return float(m.group(1)) if m else 0.0
 
 
-def _rgb_channels(color_str):
-    """Parse 'rgb(17, 26, 34)' or 'rgba(...)' -> (r, g, b) ints or None."""
-    if not color_str:
-        return None
-    m = _re.match(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', color_str)
-    if m:
-        return int(m.group(1)), int(m.group(2)), int(m.group(3))
-    return None
-
-
-def _is_dark_bg(color_str):
-    ch = _rgb_channels(color_str)
-    if not ch:
-        return False
-    return all(c < 80 for c in ch)
-
-
-def _is_light_bg(color_str):
-    ch = _rgb_channels(color_str)
-    if not ch:
-        return False
-    return all(c > 200 for c in ch)
-
-
-def _is_light_text(color_str):
-    ch = _rgb_channels(color_str)
-    if not ch:
-        return False
-    return all(c > 180 for c in ch)
-
-
-def _is_dark_text(color_str):
-    ch = _rgb_channels(color_str)
-    if not ch:
-        return False
-    return all(c < 120 for c in ch)
-
-
 # ---------------------------------------------------------------------------
 # Lookup helpers for CSS data
 # ---------------------------------------------------------------------------
@@ -370,9 +327,130 @@ def _find_all(css_data, label_prefix):
 
 
 # ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Visual QA -- Playwright automated checks + CSS extraction.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  python3 automated.py https://example.com\n"
+               "  python3 automated.py https://example.com /about\n"
+               "  python3 automated.py https://example.com /pricing --out /tmp/my-qa",
+    )
+    parser.add_argument("base_url", help="Target website URL (e.g. https://example.com)")
+    parser.add_argument("page_route", nargs="?", default="/",
+                        help="Page route to test (default: /)")
+    parser.add_argument("--out", default="/tmp/visual-qa",
+                        help="Output directory (default: /tmp/visual-qa)")
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Post-processing helpers
+# ---------------------------------------------------------------------------
+def _compute_summary(results):
+    """Compute per-part summary, critical issues, warnings, and verdict."""
+    print("\n=== COMPUTING SUMMARY ===")
+    part_summary = {}
+    for key, label in CATEGORIES.items():
+        passed = 0
+        failed = 0
+        for c in results["checks"]:
+            if _part_for(c["id"]) == key:
+                if c["status"] == "PASS":
+                    passed += 1
+                else:
+                    failed += 1
+        part_summary[key] = {"name": label, "passed": passed, "failed": failed, "total": passed + failed}
+    results["summary"] = part_summary
+
+    critical = []
+    warnings_list = []
+    for c in results["checks"]:
+        if c["status"] == "FAIL":
+            part = _part_for(c["id"])
+            entry = f"[{c['id']}] {c['name']}: {c['details']}"
+            if part in CRITICAL_PARTS:
+                critical.append(entry)
+            else:
+                warnings_list.append(entry)
+    results["critical_issues"] = critical
+    results["warnings"] = warnings_list
+
+    if critical:
+        results["verdict"] = "FIX BEFORE PUBLISHING"
+    elif warnings_list:
+        results["verdict"] = "READY TO PUBLISH (with warnings)"
+    else:
+        results["verdict"] = "READY TO PUBLISH"
+
+
+def _save_and_print(results, out_dir):
+    """Save JSON to disk and print summary to stdout."""
+    out_path = os.path.join(out_dir, "hybrid_automated_results.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False, default=str)
+
+    total_checks = len(results["checks"])
+    total_pass = sum(1 for c in results["checks"] if c["status"] == "PASS")
+    total_fail = total_checks - total_pass
+
+    ss = results["section_screenshots"].get("physical-ai", {})
+    total_ss = sum(len(v) for v in ss.values())
+
+    print(f"\n{'='*60}")
+    print(f"  RESULTS: {total_pass} PASS / {total_fail} FAIL / {total_checks} TOTAL")
+    print(f"  CSS inspected: {len(results['css_inspection'])} viewports")
+    print(f"  Section screenshots: {total_ss}")
+    print(f"  Verdict: {results['verdict']}")
+    print(f"{'='*60}")
+
+    part_summary = results["summary"]
+    for key, ps in part_summary.items():
+        sym = "OK" if ps["failed"] == 0 else "!!"
+        print(f"  [{sym}] {ps['name']}: {ps['passed']}/{ps['total']} passed")
+
+    critical = results["critical_issues"]
+    if critical:
+        print(f"\n  CRITICAL ISSUES ({len(critical)}):")
+        for ci in critical[:10]:
+            print(f"    - {ci}")
+
+    warnings_list = results["warnings"]
+    if warnings_list:
+        print(f"\n  WARNINGS ({len(warnings_list)}):")
+        for w in warnings_list[:10]:
+            print(f"    - {w}")
+
+    print(f"\n  Output: {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Browser helper
+# ---------------------------------------------------------------------------
+async def _open_page(browser, w, h, url, *, wait_ms=1000):
+    """Create a browser context, open page, navigate, and return (ctx, page)."""
+    ctx = await browser.new_context(viewport={"width": w, "height": h})
+    page = await ctx.new_page()
+    await page.goto(url, wait_until="networkidle", timeout=30000)
+    if wait_ms > 0:
+        await page.wait_for_timeout(wait_ms)
+    return ctx, page
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-async def main():
+async def main(args):
+    base_url = args.base_url.rstrip("/")
+    page_route = args.page_route
+    out_dir = args.out
+    url = f"{base_url}{page_route}"
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"Target: {url}")
+    print(f"Output: {out_dir}")
+
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -381,8 +459,8 @@ async def main():
 
     results = {
         "date": datetime.now().strftime("%Y-%m-%d"),
-        "base_url": BASE_URL,
-        "page": PAGE_ROUTE,
+        "base_url": base_url,
+        "page": page_route,
         "method": "hybrid_playwright_css_extraction",
         "checks": [],
         "summary": {},
@@ -402,8 +480,7 @@ async def main():
             "id": cid, "name": name, "category": cat,
             "status": status, "details": str(details),
         })
-        sym = "PASS" if passed else "FAIL"
-        print(f"  [{sym}] {cid} {name}")
+        print(f"  [{status}] {cid} {name}")
 
     # ===================================================================
     # Launch browser
@@ -412,59 +489,81 @@ async def main():
         browser = await pw.chromium.launch(headless=True)
 
         # ==============================================================
-        # PHASE A: CSS EXTRACTION AT ALL 7 VIEWPORTS
+        # PHASE A+B: CSS EXTRACTION + SECTION SCREENSHOTS (merged)
+        # Viewports run in parallel (semaphore=3 to limit resource use)
         # ==============================================================
-        print("\n=== PHASE A: CSS EXTRACTION (all 7 viewports) ===")
-        for dev_name, w, h in DEVICES:
-            print(f"  Viewport: {dev_name} ({w}x{h})")
-            ctx = await browser.new_context(viewport={"width": w, "height": h})
-            pg = await ctx.new_page()
-            try:
-                await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-                await pg.wait_for_timeout(2000)
-                css_data = await pg.evaluate(CSS_EXTRACT_JS)
-                results["css_inspection"][dev_name] = css_data
-                print(f"    OK -- {len(css_data)} elements")
-            except Exception as e:
-                print(f"    FAIL: {e}")
-                results["css_inspection"][dev_name] = {"error": str(e)}
-            await ctx.close()
+        print("\n=== PHASE A+B: CSS EXTRACTION & SCREENSHOTS (all 7 viewports) ===")
+        viewport_data = {}  # dev_name -> {overflow, scroll_width}
+        results["section_screenshots"]["physical-ai"] = {}
+
+        _sem = asyncio.Semaphore(3)
+
+        async def _process_viewport(dev_name, w, h):
+            async with _sem:
+                print(f"  Viewport: {dev_name} ({w}x{h})")
+                vp_result = {"css_data": [], "screenshots": [],
+                             "overflow": None, "scroll_width": None}
+                ctx, pg = await _open_page(browser, w, h, url)
+                try:
+                    # CSS extraction
+                    try:
+                        css_data = await pg.evaluate(CSS_EXTRACT_JS)
+                        vp_result["css_data"] = css_data
+                        print(f"    CSS: {len(css_data)} elements")
+                    except Exception as e:
+                        print(f"    CSS FAIL: {e}")
+                        vp_result["css_data"] = {"error": str(e)}
+
+                    # Overflow measurement (reused by Part 4 checks)
+                    try:
+                        vp_result["overflow"] = await pg.evaluate(
+                            "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+                        )
+                        vp_result["scroll_width"] = await pg.evaluate(
+                            "document.documentElement.scrollWidth"
+                        )
+                    except Exception:
+                        pass
+
+                    # Section screenshots
+                    sec_list = []
+                    try:
+                        section_info = await pg.evaluate(FIND_SECTIONS_JS)
+                        for idx, sec in enumerate(section_info):
+                            heading = sec.get("heading", "") or f"Section {idx}"
+                            slug = _re.sub(r'[^a-z0-9]+', '_', heading.lower())[:30].strip('_') or f"section_{idx}"
+                            fname = f"hybrid_physical-ai_{dev_name}_sec_{idx}_{slug}.png"
+                            try:
+                                if sec.get("selector"):
+                                    el = pg.locator(sec["selector"]).first
+                                else:
+                                    el = pg.locator("main section").nth(idx)
+                                await el.screenshot(path=os.path.join(out_dir, fname))
+                                sec_list.append({"label": heading, "file": fname})
+                                print(f"    OK  {fname}")
+                            except Exception as e2:
+                                print(f"    SKIP {fname}: {e2}")
+                    except Exception as e:
+                        print(f"    Screenshots FAIL: {e}")
+                    vp_result["screenshots"] = sec_list
+                finally:
+                    await ctx.close()
+                return dev_name, vp_result
+
+        vp_results = await asyncio.gather(
+            *[_process_viewport(dn, w, h) for dn, w, h in DEVICES]
+        )
+        for dev_name, vp_result in vp_results:
+            results["css_inspection"][dev_name] = vp_result["css_data"]
+            results["section_screenshots"]["physical-ai"][dev_name] = vp_result["screenshots"]
+            viewport_data[dev_name] = {
+                "overflow": vp_result["overflow"],
+                "scroll_width": vp_result["scroll_width"],
+            }
 
         # Shorthand to pull CSS data for a viewport
         def css(dev):
             return results["css_inspection"].get(dev, [])
-
-        # ==============================================================
-        # PHASE B: PER-SECTION SCREENSHOTS
-        # ==============================================================
-        print("\n=== PHASE B: SECTION SCREENSHOTS ===")
-        results["section_screenshots"]["physical-ai"] = {}
-        for dev_name, w, h in DEVICES:
-            sec_list = []
-            try:
-                ctx = await browser.new_context(viewport={"width": w, "height": h})
-                pg = await ctx.new_page()
-                await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-                await pg.wait_for_timeout(2000)
-                section_info = await pg.evaluate(FIND_SECTIONS_JS)
-                for idx, sec in enumerate(section_info):
-                    heading = sec.get("heading", "") or f"Section {idx}"
-                    slug = _re.sub(r'[^a-z0-9]+', '_', heading.lower())[:30].strip('_') or f"section_{idx}"
-                    fname = f"hybrid_physical-ai_{dev_name}_sec_{idx}_{slug}.png"
-                    try:
-                        if sec.get("selector"):
-                            el = pg.locator(sec["selector"]).first
-                        else:
-                            el = pg.locator("main section").nth(idx)
-                        await el.screenshot(path=os.path.join(OUT, fname))
-                        sec_list.append({"label": heading, "file": fname})
-                        print(f"    OK  {fname}")
-                    except Exception as e2:
-                        print(f"    SKIP {fname}: {e2}")
-                results["section_screenshots"]["physical-ai"][dev_name] = sec_list
-                await ctx.close()
-            except Exception as e:
-                print(f"    FAIL {dev_name}: {e}")
 
         # ==============================================================
         # PART 1 -- Page Load & Layout (IDs 1.x - 5.x)
@@ -479,10 +578,10 @@ async def main():
         pg = await ctx.new_page()
         pg.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
         pg.on("requestfailed", lambda req: network_failures.append(f"{req.method} {req.url} -> {req.failure}"))
-        pg.on("response", lambda resp: font_responses.append({"url": resp.url, "status": resp.status}) if ".woff" in resp.url else None)
+        pg.on("response", lambda resp: font_responses.append({"url": resp.url, "status": resp.status}) if _re.search(r'\.woff2?(\?|$)', resp.url) else None)
 
-        resp = await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
+        resp = await pg.goto(url, wait_until="networkidle", timeout=30000)
+        await pg.wait_for_timeout(1000)
 
         # 1.1 HTTP 200
         status_code = resp.status if resp else 0
@@ -803,37 +902,25 @@ async def main():
             len(small_targets) <= 2,  # Allow up to 2 minor exceptions
             f"{len(small_targets)} small targets" + (f": {small_targets[:3]}" if small_targets else ""))
 
-        # 11.4 No mobile horizontal scroll at 375px
-        ctx = await browser.new_context(viewport={"width": 375, "height": 667})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
-        mob_overflow = await pg.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
-        mob_sw = await pg.evaluate("document.documentElement.scrollWidth")
+        # 11.4 No mobile horizontal scroll at 375px (uses Phase A+B data)
+        vd_se = viewport_data.get("iPhone_SE", {})
+        mob_overflow = vd_se.get("overflow", False)
+        mob_sw = vd_se.get("scroll_width", 375)
         add("11.4", "No mobile horizontal scroll (375px)", "Responsiveness",
             not mob_overflow,
             f"scrollWidth={mob_sw}" if mob_overflow else "No overflow")
-        await ctx.close()
 
-        # 12.1 iPhone 15 layout OK (393px)
-        ctx = await browser.new_context(viewport={"width": 393, "height": 852})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
-        ip15_overflow = await pg.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        # 12.1 iPhone 15 layout OK (393px, uses Phase A+B data)
+        vd_15 = viewport_data.get("iPhone_15", {})
+        ip15_overflow = vd_15.get("overflow", False)
         add("12.1", "iPhone 15 layout OK (393px, no overflow)", "Responsiveness",
             not ip15_overflow, "No overflow" if not ip15_overflow else "Overflow detected")
-        await ctx.close()
 
-        # 12.2 iPhone 15 Pro Max layout OK (430px)
-        ctx = await browser.new_context(viewport={"width": 430, "height": 932})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
-        ip15pm_overflow = await pg.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        # 12.2 iPhone 15 Pro Max layout OK (430px, uses Phase A+B data)
+        vd_15pm = viewport_data.get("iPhone_15_Pro_Max", {})
+        ip15pm_overflow = vd_15pm.get("overflow", False)
         add("12.2", "iPhone 15 Pro Max layout OK (430px, no overflow)", "Responsiveness",
             not ip15pm_overflow, "No overflow" if not ip15pm_overflow else "Overflow detected")
-        await ctx.close()
 
         # 13.1 iPad Air layout (820px -- should have hamburger)
         add("13.1", "iPad Air layout (820px, hamburger nav)", "Responsiveness",
@@ -887,168 +974,131 @@ async def main():
         print("\n=== PART 5: INTERACTIONS ===")
 
         # 15.1 Nav link click -- About
-        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
+        ctx, pg = await _open_page(browser, 1440, 900, url)
         try:
-            await pg.click("nav a[href*='about'], nav a:has-text('About')", timeout=3000)
-            await pg.wait_for_timeout(2000)
-            path = await pg.evaluate("window.location.pathname")
-            add("15.1", "Nav link click (About)", "Interactions",
-                "/about" in path, f"Navigated to: {path}")
-            results["interaction_tests"]["nav_about"] = path
-        except Exception as e:
-            add("15.1", "Nav link click (About)", "Interactions",
-                False, f"SKIP -- single page site or link not found: {str(e)[:80]}")
-            results["interaction_tests"]["nav_about"] = f"error: {str(e)[:60]}"
-        await ctx.close()
+            try:
+                await pg.click(SELECTORS["nav_about_link"], timeout=3000)
+                await pg.wait_for_timeout(1000)
+                path = await pg.evaluate("window.location.pathname")
+                add("15.1", "Nav link click (About)", "Interactions",
+                    "/about" in path, f"Navigated to: {path}")
+                results["interaction_tests"]["nav_about"] = path
+            except Exception as e:
+                add("15.1", "Nav link click (About)", "Interactions",
+                    False, f"SKIP -- single page site or link not found: {str(e)[:80]}")
+                results["interaction_tests"]["nav_about"] = f"error: {str(e)[:60]}"
+        finally:
+            await ctx.close()
 
-        # 15.2 Active link indicator (Physical AI link underlined/highlighted)
-        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
-        try:
-            active_link = await pg.evaluate("""
-                (() => {
-                    const links = document.querySelectorAll('nav a[href]');
-                    for (const a of links) {
-                        const txt = a.textContent.trim();
-                        if (txt.includes('Physical') || txt.includes('AI')) {
-                            const s = getComputedStyle(a);
-                            return {
-                                text: txt, opacity: s.opacity,
-                                textDecoration: s.textDecorationLine,
-                                fontWeight: s.fontWeight,
-                            };
-                        }
-                    }
-                    return null;
-                })()
-            """)
-            has_indicator = active_link is not None and (
-                active_link.get("textDecoration", "").count("underline") > 0
-                or active_link.get("opacity") == "1"
-            )
-            add("15.2", "Active link indicator (Physical AI)", "Interactions",
-                has_indicator, f"link: {active_link}")
-            results["interaction_tests"]["active_link"] = active_link
-        except Exception as e:
-            add("15.2", "Active link indicator", "Interactions", False, str(e)[:80])
-        await ctx.close()
+        # 15.2 — runs in shared 23.x context (see below)
 
         # 15.3 Logo click
-        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
+        ctx, pg = await _open_page(browser, 1440, 900, url)
         try:
-            await pg.click("nav a:has(img), nav a:has(svg)", timeout=3000)
-            await pg.wait_for_timeout(2000)
-            path = await pg.evaluate("window.location.pathname")
-            add("15.3", "Logo click navigates", "Interactions",
-                True, f"Navigated to: {path}")
-            results["interaction_tests"]["logo_click"] = path
-        except Exception as e:
-            add("15.3", "Logo click navigates", "Interactions",
-                False, f"SKIP: {str(e)[:80]}")
-        await ctx.close()
+            try:
+                await pg.click(SELECTORS["nav_logo"], timeout=3000)
+                await pg.wait_for_timeout(1000)
+                path = await pg.evaluate("window.location.pathname")
+                add("15.3", "Logo click navigates", "Interactions",
+                    True, f"Navigated to: {path}")
+                results["interaction_tests"]["logo_click"] = path
+            except Exception as e:
+                add("15.3", "Logo click navigates", "Interactions",
+                    False, f"SKIP: {str(e)[:80]}")
+        finally:
+            await ctx.close()
 
         # 16.1 Contact modal opens (desktop)
-        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
+        ctx, pg = await _open_page(browser, 1440, 900, url)
         modal_opened = False
         modal_fields_count = 0
         modal_closed = False
         try:
-            await pg.click("button:has-text('Contact'), a:has-text('Contact')", timeout=3000)
-            await pg.wait_for_timeout(1500)
-            modal_opened = await pg.evaluate("""
-                !!document.querySelector('[role=dialog], [aria-modal=true], .fixed.inset-0, [class*=modal]')
-            """)
-            if modal_opened:
-                await pg.screenshot(path=os.path.join(OUT, "hybrid_modal_contact_desktop.png"))
-
-            add("16.1", "Contact modal opens", "Interactions",
-                modal_opened, "Modal appeared" if modal_opened else "Modal not detected")
-            results["interaction_tests"]["contact_modal"] = modal_opened
-
-            # 16.2 Modal has form fields
-            if modal_opened:
-                fields = await pg.evaluate("""
-                    (() => {
-                        const els = document.querySelectorAll('input, textarea, select');
-                        return Array.from(els).map(e => ({
-                            tag: e.tagName, name: e.name || e.id || e.placeholder || '',
-                            required: e.required,
-                        }));
-                    })()
+            try:
+                await pg.click(SELECTORS["contact_cta"], timeout=3000)
+                await pg.wait_for_timeout(1500)
+                modal_opened = await pg.evaluate("""
+                    !!document.querySelector('[role=dialog], [aria-modal=true], .fixed.inset-0, [class*=modal]')
                 """)
-                modal_fields_count = len(fields)
-                add("16.2", "Modal has form fields (>= 4)", "Interactions",
-                    modal_fields_count >= 4,
-                    f"{modal_fields_count} fields: {[f['name'] for f in fields[:6]]}")
+                if modal_opened:
+                    await pg.screenshot(path=os.path.join(out_dir, "hybrid_modal_contact_desktop.png"))
 
-                # 16.3 — Removed (form validation check not applicable)
+                add("16.1", "Contact modal opens", "Interactions",
+                    modal_opened, "Modal appeared" if modal_opened else "Modal not detected")
+                results["interaction_tests"]["contact_modal"] = modal_opened
 
-                # 16.4 Modal closes
-                close_btn = pg.locator("button:has-text('\u00d7'), button:has-text('Close'), button[aria-label*='close'], button[aria-label*='Close'], [role=dialog] button:first-of-type")
-                if await close_btn.count() > 0:
-                    await close_btn.first.click()
-                    await pg.wait_for_timeout(500)
-                    modal_gone = await pg.evaluate("""
-                        !document.querySelector('[role=dialog], [aria-modal=true]')
+                # 16.2 Modal has form fields
+                if modal_opened:
+                    fields = await pg.evaluate("""
+                        (() => {
+                            const els = document.querySelectorAll('input, textarea, select');
+                            return Array.from(els).map(e => ({
+                                tag: e.tagName, name: e.name || e.id || e.placeholder || '',
+                                required: e.required,
+                            }));
+                        })()
                     """)
-                    modal_closed = modal_gone
-                    add("16.4", "Modal closes", "Interactions",
-                        modal_closed, "Dismissed" if modal_closed else "Still visible")
+                    modal_fields_count = len(fields)
+                    add("16.2", "Modal has form fields (>= 4)", "Interactions",
+                        modal_fields_count >= 4,
+                        f"{modal_fields_count} fields: {[f['name'] for f in fields[:6]]}")
+
+                    # 16.3 — Removed (form validation check not applicable)
+
+                    # 16.4 Modal closes
+                    close_btn = pg.locator(SELECTORS["modal_close"])
+                    if await close_btn.count() > 0:
+                        await close_btn.first.click()
+                        await pg.wait_for_timeout(500)
+                        modal_gone = await pg.evaluate("""
+                            !document.querySelector('[role=dialog], [aria-modal=true]')
+                        """)
+                        modal_closed = modal_gone
+                        add("16.4", "Modal closes", "Interactions",
+                            modal_closed, "Dismissed" if modal_closed else "Still visible")
+                    else:
+                        # Try pressing Escape
+                        await pg.keyboard.press("Escape")
+                        await pg.wait_for_timeout(500)
+                        modal_gone = await pg.evaluate("""
+                            !document.querySelector('[role=dialog], [aria-modal=true]')
+                        """)
+                        modal_closed = modal_gone
+                        add("16.4", "Modal closes (Escape key)", "Interactions",
+                            modal_closed, "Dismissed via Escape" if modal_closed else "Still visible")
                 else:
-                    # Try pressing Escape
-                    await pg.keyboard.press("Escape")
-                    await pg.wait_for_timeout(500)
-                    modal_gone = await pg.evaluate("""
-                        !document.querySelector('[role=dialog], [aria-modal=true]')
-                    """)
-                    modal_closed = modal_gone
-                    add("16.4", "Modal closes (Escape key)", "Interactions",
-                        modal_closed, "Dismissed via Escape" if modal_closed else "Still visible")
-            else:
-                add("16.2", "Modal has form fields", "Interactions", False, "Modal did not open")
-                add("16.4", "Modal closes", "Interactions", False, "Modal did not open")
+                    add("16.2", "Modal has form fields", "Interactions", False, "Modal did not open")
+                    add("16.4", "Modal closes", "Interactions", False, "Modal did not open")
 
-            results["interaction_tests"]["modal_fields"] = modal_fields_count
-            results["interaction_tests"]["modal_closed"] = modal_closed
-        except Exception as e:
-            add("16.1", "Contact modal opens", "Interactions", False, str(e)[:100])
-            add("16.2", "Modal has form fields", "Interactions", False, "Modal test failed")
-            add("16.4", "Modal closes", "Interactions", False, "Modal test failed")
-        await ctx.close()
+                results["interaction_tests"]["modal_fields"] = modal_fields_count
+                results["interaction_tests"]["modal_closed"] = modal_closed
+            except Exception as e:
+                add("16.1", "Contact modal opens", "Interactions", False, str(e)[:100])
+                add("16.2", "Modal has form fields", "Interactions", False, "Modal test failed")
+                add("16.4", "Modal closes", "Interactions", False, "Modal test failed")
+        finally:
+            await ctx.close()
 
         # 17.1 Hamburger menu opens (mobile)
-        ctx = await browser.new_context(viewport={"width": 375, "height": 667})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(2000)
+        ctx, pg = await _open_page(browser, 375, 667, url)
         try:
-            hamburger_sel = 'button[class*="lg:hidden"], button[aria-label="Toggle menu"], nav button[class*="menu"]'
-            await pg.click(hamburger_sel, timeout=3000)
-            await pg.wait_for_timeout(500)
-            await pg.screenshot(path=os.path.join(OUT, "hybrid_hamburger_open.png"), full_page=False)
-            menu_links = await pg.evaluate("""
-                Array.from(document.querySelectorAll('nav a')).filter(a => {
-                    const r = a.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0 && a.textContent.trim().length > 0;
-                }).map(a => a.textContent.trim())
-            """)
-            add("17.1", "Hamburger menu opens (mobile)", "Interactions",
-                len(menu_links) >= 2, f"Links visible: {menu_links}")
-            results["interaction_tests"]["hamburger_menu"] = menu_links
-        except Exception as e:
-            add("17.1", "Hamburger menu opens", "Interactions", False, str(e)[:100])
-        await ctx.close()
+            try:
+                await pg.click(SELECTORS["hamburger_btn"], timeout=3000)
+                await pg.wait_for_timeout(500)
+                await pg.screenshot(path=os.path.join(out_dir, "hybrid_hamburger_open.png"), full_page=False)
+                menu_links = await pg.evaluate("""
+                    Array.from(document.querySelectorAll('nav a')).filter(a => {
+                        const r = a.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0 && a.textContent.trim().length > 0;
+                    }).map(a => a.textContent.trim())
+                """)
+                add("17.1", "Hamburger menu opens (mobile)", "Interactions",
+                    len(menu_links) >= 2, f"Links visible: {menu_links}")
+                results["interaction_tests"]["hamburger_menu"] = menu_links
+            except Exception as e:
+                add("17.1", "Hamburger menu opens", "Interactions", False, str(e)[:100])
+        finally:
+            await ctx.close()
 
         # ==============================================================
         # PART 6 -- Console & Network (IDs 19.x - 20.x)
@@ -1160,142 +1210,107 @@ async def main():
             nav_h_consistent,
             f"MacBook Air={desk_nav_h}px, MacBook Pro={mbp_nav_h}px, iPad Pro={ipad_pro_nav_h}px")
 
-        # 23.1 Semantic HTML (nav, main, footer)
-        ctx = await browser.new_context(viewport={"width": 1440, "height": 900})
-        pg = await ctx.new_page()
-        await pg.goto(f"{BASE_URL}{PAGE_ROUTE}", wait_until="networkidle", timeout=30000)
-        await pg.wait_for_timeout(1500)
+        # 15.2 + 23.x -- shared read-only context at 1440x900
+        ctx, pg = await _open_page(browser, 1440, 900, url)
+        try:
+            # 15.2 Active link indicator (Physical AI link underlined/highlighted)
+            try:
+                active_link = await pg.evaluate("""
+                    (() => {
+                        const links = document.querySelectorAll('nav a[href]');
+                        for (const a of links) {
+                            const txt = a.textContent.trim();
+                            if (txt.includes('Physical') || txt.includes('AI')) {
+                                const s = getComputedStyle(a);
+                                return {
+                                    text: txt, opacity: s.opacity,
+                                    textDecoration: s.textDecorationLine,
+                                    fontWeight: s.fontWeight,
+                                };
+                            }
+                        }
+                        return null;
+                    })()
+                """)
+                has_indicator = active_link is not None and (
+                    active_link.get("textDecoration", "").count("underline") > 0
+                    or active_link.get("opacity") == "1"
+                )
+                add("15.2", "Active link indicator (Physical AI)", "Interactions",
+                    has_indicator, f"link: {active_link}")
+                results["interaction_tests"]["active_link"] = active_link
+            except Exception as e:
+                add("15.2", "Active link indicator", "Interactions", False, str(e)[:80])
 
-        semantic = await pg.evaluate("""
-            (() => ({
-                hasNav: !!document.querySelector('nav'),
-                hasMain: !!document.querySelector('main'),
-                hasFooter: !!document.querySelector('footer'),
-                hasHeader: !!document.querySelector('header'),
-            }))()
-        """)
-        sem_ok = semantic.get("hasNav") and semantic.get("hasMain") and semantic.get("hasFooter")
-        add("23.1", "Semantic HTML (nav, main, footer elements)", "Page Load & Layout",
-            sem_ok, str(semantic))
+            # 23.1 Semantic HTML (nav, main, footer)
+            semantic = await pg.evaluate("""
+                (() => ({
+                    hasNav: !!document.querySelector('nav'),
+                    hasMain: !!document.querySelector('main'),
+                    hasFooter: !!document.querySelector('footer'),
+                    hasHeader: !!document.querySelector('header'),
+                }))()
+            """)
+            sem_ok = semantic.get("hasNav") and semantic.get("hasMain") and semantic.get("hasFooter")
+            add("23.1", "Semantic HTML (nav, main, footer elements)", "Page Load & Layout",
+                sem_ok, str(semantic))
 
-        # 23.2 Heading hierarchy (h1 before any h2)
-        heading_order = await pg.evaluate("""
-            (() => {
-                const all = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
-                return Array.from(all).map(h => ({
-                    tag: h.tagName, text: h.textContent.trim().substring(0, 40)
-                }));
-            })()
-        """)
-        h1_first = len(heading_order) > 0 and heading_order[0].get("tag") == "H1"
-        add("23.2", "Heading hierarchy (h1 comes before h2)", "Page Load & Layout",
-            h1_first,
-            f"First heading: {heading_order[0] if heading_order else 'none'}")
+            # 23.2 Heading hierarchy (h1 before any h2)
+            heading_order = await pg.evaluate("""
+                (() => {
+                    const all = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
+                    return Array.from(all).map(h => ({
+                        tag: h.tagName, text: h.textContent.trim().substring(0, 40)
+                    }));
+                })()
+            """)
+            h1_first = len(heading_order) > 0 and heading_order[0].get("tag") == "H1"
+            add("23.2", "Heading hierarchy (h1 comes before h2)", "Page Load & Layout",
+                h1_first,
+                f"First heading: {heading_order[0] if heading_order else 'none'}")
 
-        # 23.3 Section accessibility (sections have headings)
-        sections_with_headings = await pg.evaluate("""
-            (() => {
-                const sections = document.querySelectorAll('main section');
-                let withH = 0, without = 0;
-                sections.forEach(s => {
-                    if (s.querySelector('h1, h2, h3')) withH++;
-                    else without++;
-                });
-                return { withHeading: withH, withoutHeading: without, total: sections.length };
-            })()
-        """)
-        all_have_headings = sections_with_headings.get("withoutHeading", 0) == 0
-        add("23.3", "Section accessibility (sections have headings)", "Page Load & Layout",
-            all_have_headings,
-            f"{sections_with_headings.get('withHeading')}/{sections_with_headings.get('total')} have headings")
+            # 23.3 Section accessibility (sections have headings)
+            sections_with_headings = await pg.evaluate("""
+                (() => {
+                    const sections = document.querySelectorAll('main section');
+                    let withH = 0, without = 0;
+                    sections.forEach(s => {
+                        if (s.querySelector('h1, h2, h3')) withH++;
+                        else without++;
+                    });
+                    return { withHeading: withH, withoutHeading: without, total: sections.length };
+                })()
+            """)
+            all_have_headings = sections_with_headings.get("withoutHeading", 0) == 0
+            add("23.3", "Section accessibility (sections have headings)", "Page Load & Layout",
+                all_have_headings,
+                f"{sections_with_headings.get('withHeading')}/{sections_with_headings.get('total')} have headings")
 
-        # 23.4 Skip navigation link
-        skip_nav = await pg.evaluate("""
-            !!document.querySelector('a[href="#main-content"], a[href="#main"], a.skip-to-content, a[class*="skip"]')
-        """)
-        add("23.4", "Skip navigation link exists", "Page Load & Layout",
-            skip_nav, "Found" if skip_nav else "Not found (advisory)")
+            # 23.4 Skip navigation link
+            skip_nav = await pg.evaluate("""
+                !!document.querySelector('a[href="#main-content"], a[href="#main"], a.skip-to-content, a[class*="skip"]')
+            """)
+            add("23.4", "Skip navigation link exists", "Page Load & Layout",
+                skip_nav, "Found" if skip_nav else "Not found (advisory)")
+        finally:
+            await ctx.close()
 
-        await ctx.close()
         await browser.close()
 
-    # ==================================================================
-    # COMPUTE SUMMARY, VERDICT, CRITICAL ISSUES
-    # ==================================================================
-    print("\n=== COMPUTING SUMMARY ===")
+    _compute_summary(results)
+    _save_and_print(results, out_dir)
 
-    part_summary = {}
-    for key, label in CATEGORIES.items():
-        passed = 0
-        failed = 0
-        for c in results["checks"]:
-            if _part_for(c["id"]) == key:
-                if c["status"] == "PASS":
-                    passed += 1
-                else:
-                    failed += 1
-        part_summary[key] = {"name": label, "passed": passed, "failed": failed, "total": passed + failed}
-    results["summary"] = part_summary
 
-    # Critical issues: any FAIL in critical parts
-    critical = []
-    warnings_list = []
-    for c in results["checks"]:
-        if c["status"] == "FAIL":
-            part = _part_for(c["id"])
-            entry = f"[{c['id']}] {c['name']}: {c['details']}"
-            if part in CRITICAL_PARTS:
-                critical.append(entry)
-            else:
-                warnings_list.append(entry)
-    results["critical_issues"] = critical
-    results["warnings"] = warnings_list
+_GLOBAL_TIMEOUT = 300  # 5 minutes
 
-    # Verdict
-    if critical:
-        results["verdict"] = "FIX BEFORE PUBLISHING"
-    elif warnings_list:
-        results["verdict"] = "READY TO PUBLISH (with warnings)"
-    else:
-        results["verdict"] = "READY TO PUBLISH"
 
-    # ==================================================================
-    # SAVE
-    # ==================================================================
-    out_path = os.path.join(OUT, "hybrid_automated_results.json")
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False, default=str)
-
-    total_checks = len(results["checks"])
-    total_pass = sum(1 for c in results["checks"] if c["status"] == "PASS")
-    total_fail = total_checks - total_pass
-
-    ss = results["section_screenshots"].get("physical-ai", {})
-    total_ss = sum(len(v) for v in ss.values())
-
-    print(f"\n{'='*60}")
-    print(f"  RESULTS: {total_pass} PASS / {total_fail} FAIL / {total_checks} TOTAL")
-    print(f"  CSS inspected: {len(results['css_inspection'])} viewports")
-    print(f"  Section screenshots: {total_ss}")
-    print(f"  Verdict: {results['verdict']}")
-    print(f"{'='*60}")
-
-    for key, ps in part_summary.items():
-        sym = "OK" if ps["failed"] == 0 else "!!"
-        print(f"  [{sym}] {ps['name']}: {ps['passed']}/{ps['total']} passed")
-
-    if critical:
-        print(f"\n  CRITICAL ISSUES ({len(critical)}):")
-        for ci in critical[:10]:
-            print(f"    - {ci}")
-
-    if warnings_list:
-        print(f"\n  WARNINGS ({len(warnings_list)}):")
-        for w in warnings_list[:10]:
-            print(f"    - {w}")
-
-    print(f"\n  Output: {out_path}")
+async def _run_with_timeout(args):
+    try:
+        await asyncio.wait_for(main(args), timeout=_GLOBAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        print(f"\n*** TIMEOUT: script exceeded {_GLOBAL_TIMEOUT}s ***")
+        sys.exit(2)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_run_with_timeout(_parse_args()))
