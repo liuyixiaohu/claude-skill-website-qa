@@ -1,5 +1,9 @@
 # Claude Visual QA
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-Skill-blueviolet)](https://docs.anthropic.com/en/docs/claude-code)
+
 **One command to check if your website looks right on every device — from iPhone SE to MacBook Pro.**
 
 Before publishing a website, you want to make sure it looks correct on phones, tablets, and desktops. This tool does that automatically: it runs visual checks across 7 screen sizes, captures screenshots of every section, and gives you a Word report with a clear pass/fail verdict.
