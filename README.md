@@ -1,14 +1,57 @@
 # Claude Visual QA
 
-A **Claude Code skill** that runs automated visual QA on any website — 63 checks across 7 Apple device viewports, per-section screenshots, CSS extraction, and a Word report.
+**One command to check if your website looks right on every device — from iPhone SE to MacBook Pro.**
 
-## What It Does
+Before publishing a website, you want to make sure it looks correct on phones, tablets, and desktops. This tool does that automatically: it runs 63 visual checks across 7 screen sizes, captures screenshots of every section, and gives you a Word report with a clear pass/fail verdict.
 
-| Layer | Tool | Capabilities |
-|-------|------|-------------|
-| **Playwright** | `scripts/automated.py` | 63 automated checks, `getComputedStyle()` CSS extraction at 7 viewports, per-section screenshots, interaction tests |
-| **MCP Preview** | `preview_inspect` / `preview_snapshot` / `preview_eval` | Real-time CSS verification, accessibility tree, interactive element testing |
-| **Report** | `scripts/report.py` | Word document with pass/fail summary, CSS comparison tables, screenshots |
+> **New to this?** See the [User Guide](GUIDE.md) for a step-by-step walkthrough with screenshots.
+
+## How It Works
+
+```
+  ┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  You type:   │────▶│  Automated   │────▶│  Screenshots │────▶│  Word report │
+  │  "Run visual │     │  checks run  │     │  captured at │     │  on your     │
+  │   QA on..."  │     │  (63 checks) │     │  7 viewports │     │  Desktop     │
+  └─────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+       ~10 sec              ~2 min              ~1 min               Done!
+```
+
+This is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill — you install it into your project, then just ask Claude to run QA in natural language.
+
+## What the Report Tells You
+
+The generated report (`~/Desktop/Visual_QA_Report.docx`) includes:
+
+- **Overall verdict** — "Ready to Publish" or "Fix Before Publishing"
+- **Pass/fail summary** by category (layout, typography, images, responsiveness, interactions, errors)
+- **Screenshots of every section** — desktop full-width, plus tablet and mobile side-by-side
+- **Interaction screenshots** — modals, hamburger menus, navigation states
+- **CSS comparison table** — how fonts and sizes actually render at mobile, tablet, and desktop
+- **Critical issues & warnings** — prioritized list of what to fix
+
+## What It Checks (63 Checks)
+
+| Category | Examples |
+|----------|---------|
+| Page Load & Layout | Does the page load? Are meta tags and social share (OG) tags present? Is the HTML structure semantic? |
+| Typography & Colors | Are the right fonts loading? Do headings scale properly on smaller screens? |
+| Images & Media | Do all images load? Do they have alt text for accessibility? |
+| Responsiveness | Does anything overflow on mobile? Does the hamburger menu appear? Do sections stack correctly? |
+| Interactions | Does the contact modal open? Does the hamburger menu work? Is the current nav item highlighted? |
+| Console & Network | Any JavaScript errors? Any failed network requests? |
+
+## Device Viewports Tested
+
+| Device | Screen Size |
+|--------|------------|
+| iPhone SE | 375 x 667 |
+| iPhone 15 | 393 x 852 |
+| iPhone 15 Pro Max | 430 x 932 |
+| iPad Air | 820 x 1180 |
+| iPad Pro 12.9" | 1024 x 1366 |
+| MacBook Air 13" | 1440 x 900 |
+| MacBook Pro 16" | 1728 x 1117 |
 
 ## Quick Start
 
@@ -19,90 +62,46 @@ pip3 install python-docx Pillow playwright
 python3 -m playwright install chromium
 ```
 
-### 2. Install the skill
-
-Copy into any repo's `.claude/skills/` directory:
+### 2. Install the skill into your project
 
 ```bash
-# Option A: Clone directly
-git clone https://github.com/liuyixiaohu/claude-visual-qa.git .claude/skills/visual-qa
-
-# Option B: Add as git submodule
-git submodule add https://github.com/liuyixiaohu/claude-visual-qa.git .claude/skills/visual-qa
+cd ~/Documents/GitHub/YourProject
+git clone https://github.com/liuyixiaohu/claude-skill-website-qa.git .claude/skills/visual-qa
 ```
 
 ### 3. Run QA
 
-Open Claude Code in your repo and type:
+Open Claude Code in your project and type:
 
 ```
 Run visual QA on https://your-website.com
 ```
 
-Claude will automatically:
-1. Run 63 automated checks (~2–3 min)
-2. Capture per-section screenshots across 7 viewports
-3. Extract computed CSS values
-4. Generate a Word report on your Desktop
+That's it. Claude will run all 63 checks, capture screenshots, and generate the report on your Desktop.
 
-## Standalone Usage (without Claude Code)
+## Standalone Usage (Without Claude Code)
+
+You can also run the scripts directly from the command line:
 
 ```bash
-# Run automated checks
-python3 scripts/automated.py https://your-site.com /page-route
+# Run automated checks on a specific page
+python3 scripts/automated.py https://your-site.com /about
 
-# Generate report
+# Generate the Word report from results
 python3 scripts/report.py
-
-# Start reverse proxy (for MCP Preview on external URLs)
-node scripts/proxy.js https://your-site.com
 ```
-
-## Device Viewports
-
-| Device | Width | Height |
-|--------|-------|--------|
-| iPhone SE | 375 | 667 |
-| iPhone 15 | 393 | 852 |
-| iPhone 15 Pro Max | 430 | 932 |
-| iPad Air | 820 | 1180 |
-| iPad Pro 12.9" | 1024 | 1366 |
-| MacBook Air 13" | 1440 | 900 |
-| MacBook Pro 16" | 1728 | 1117 |
-
-## Check Categories (63 total)
-
-| Category | What It Checks |
-|----------|----------------|
-| Page Load & Layout | HTTP status, meta tags, OG tags, semantic structure |
-| Typography & Colors | Font families, heading sizes, responsive scaling |
-| Images & Media | Load status, alt text, image count |
-| Responsiveness | Overflow, hamburger nav, layout stacking |
-| Interactions | Modal dialogs, hamburger menu, nav indicators |
-| Console & Network | JS errors, failed requests |
-
-## Report Output
-
-The report (`~/Desktop/Visual_QA_Report.docx`) includes:
-
-- **Verdict**: Ready to Publish / Fix Before Publishing
-- **Summary table**: Pass/fail by category
-- **CSS comparison**: Typography at 3 viewports (mobile, tablet, desktop)
-- **Section screenshots**: Desktop full-width + tablet/mobile side-by-side
-- **Interaction screenshots**: Contact modal, hamburger menu
-- **Critical issues & warnings**
 
 ## Files
 
 ```
-├── SKILL.md              # Claude Code skill definition
-├── GUIDE.md              # Non-technical user guide
+├── SKILL.md              # Skill definition (how Claude uses this tool)
+├── GUIDE.md              # Step-by-step user guide for non-technical users
+├── scripts/
+│   ├── automated.py      # Runs 63 checks + captures screenshots + extracts CSS
+│   ├── report.py         # Generates the Word report
+│   └── proxy.js          # Helper for testing external URLs via Claude's preview
 ├── CHANGELOG.md          # Version history
-├── README.md             # This file
-└── scripts/
-    ├── automated.py      # Playwright checks + CSS extraction
-    ├── report.py         # Word report generator
-    └── proxy.js          # Reverse proxy for MCP Preview
+└── README.md             # This file
 ```
 
 ## License
