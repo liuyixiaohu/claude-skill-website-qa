@@ -1,0 +1,24 @@
+# Visual QA Configuration (optional)
+# Copy this file to qa-config.yaml and customize for your site.
+# All values below are the defaults — only override what you need.
+
+# Expected fonts (set to check specific fonts, or leave null to just check consistency)
+fonts:
+  heading: null      # e.g., "Inter", "Goia", "Playfair Display"
+  body: null         # e.g., "Poppins", "Roboto", "Open Sans"
+
+# Site features — "auto" detects at runtime, true/false forces on/off
+features:
+  nav: auto              # Does the site have a <nav> element?
+  hamburger: auto        # Does mobile view use a hamburger menu?
+  contact_modal: auto    # Does clicking "Contact" open a modal dialog?
+  hero_section: auto     # Does the page have a hero/banner section?
+  footer: auto           # Does the page have a <footer>?
+
+# Thresholds for pass/fail decisions
+thresholds:
+  hero_min_height: 200   # Minimum hero section height in pixels
+  h1_min_mobile: 20      # Minimum h1 font size on mobile (px)
+  h1_min_desktop: 28     # Minimum h1 font size on desktop (px)
+  nav_min_links: 2       # Minimum visible nav links on desktop
+  touch_target_min: 44   # Minimum touch target size on mobile (px)

@@ -269,6 +269,7 @@ def main():
 
     total_p = sum(1 for c in checks if c["status"] == "PASS")
     total_f = sum(1 for c in checks if c["status"] == "FAIL")
+    total_s = sum(1 for c in checks if c["status"] == "SKIP")
     total_c = len(checks)
 
     # Determine verdict
@@ -291,7 +292,8 @@ def main():
     run.bold = True
     run.font.size = Pt(14)
     run.font.color.rgb = v_color
-    r2 = p.add_run(f"   ({total_p} passed, {total_f} failed out of {total_c} checks)")
+    skip_note = f", {total_s} skipped" if total_s > 0 else ""
+    r2 = p.add_run(f"   ({total_p} passed, {total_f} failed{skip_note} out of {total_c} checks)")
     r2.font.size = Pt(10)
 
     # Summary table
@@ -360,15 +362,20 @@ def main():
             r.font.size = Pt(8)
 
         for check in cat_checks:
-            ok = check["status"] == "PASS"
+            status = check["status"]
             row = table.add_row().cells
 
             p = row[0].paragraphs[0]
             p.clear()
-            r = p.add_run("PASS" if ok else "FAIL")
+            r = p.add_run(status)
             r.bold = True
             r.font.size = Pt(7)
-            r.font.color.rgb = GREEN if ok else RED
+            if status == "PASS":
+                r.font.color.rgb = GREEN
+            elif status == "SKIP":
+                r.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+            else:
+                r.font.color.rgb = RED
 
             p = row[1].paragraphs[0]
             p.clear()

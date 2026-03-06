@@ -6,7 +6,7 @@ A quick-start guide for running Visual QA on any website before publishing.
 
 ## What This Does
 
-This tool automatically checks a website for visual issues — broken images, layout problems, missing text, interaction bugs — across **7 different screen sizes** (from iPhone SE to MacBook Pro 16"). It produces a **Word report** on your Desktop with screenshots and a pass/fail summary.
+This tool automatically checks **any website** for visual issues — broken images, layout problems, missing text, interaction bugs — across **7 different screen sizes** (from iPhone SE to MacBook Pro 16"). It auto-detects what your site has (navigation bar, hamburger menu, contact form, hero section, footer) and only runs relevant checks. It produces a **Word report** on your Desktop with screenshots and a pass/fail summary.
 
 ---
 

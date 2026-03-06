@@ -10,7 +10,7 @@ This skill runs a **hybrid visual QA** on any website, combining two complementa
 
 | Layer | Tool | What It Does |
 |-------|------|-------------|
-| **Playwright** | `scripts/automated.py` | 7 viewports x per-section screenshots, 63 automated checks, `getComputedStyle()` CSS extraction on 30+ elements per viewport, interaction tests |
+| **Playwright** | `scripts/automated.py` | 7 viewports x per-section screenshots, auto-detected checks (nav, hamburger, modal, hero, footer), `getComputedStyle()` CSS extraction on 30+ elements per viewport, interaction tests |
 | **MCP Preview** | `preview_inspect` / `preview_snapshot` / `preview_eval` / `preview_click` | Real-time CSS verification, accessibility tree, interactive element testing |
 
 All output and the final Word report must be in **English**.
@@ -88,10 +88,10 @@ Default output directory: `/tmp/visual-qa`
 | Category | Check IDs | Examples |
 |----------|-----------|---------|
 | Page Load & Layout | 1.x - 5.x | HTTP 200, title, meta tags, OG tags, canonical, console errors, network failures, font loading, section structure |
-| Typography & Colors | 6.x - 8.x | Font families, heading sizes scale responsively, button styles consistent |
+| Typography & Colors | 6.x - 8.x | Font consistency across headings/body, heading hierarchy, text readability, button styles consistent |
 | Images & Media | 9.x - 10.x | All images loaded, alt text present, hero image renders, reasonable image count |
-| Responsiveness | 11.x - 14.x | No horizontal overflow, hamburger visible on mobile, nav links hidden on mobile, hero text scales, sections stack vertically |
-| Interactions | 15.x - 16.x | Contact modal opens (desktop + mobile), hamburger menu opens, active nav indicator, modal has form fields |
+| Responsiveness | 11.x - 14.x | No horizontal overflow, hamburger visible on mobile *(if applicable)*, nav responsive transition, hero text scales, sections stack vertically |
+| Interactions | 15.x - 16.x | Nav link click, active link indicator, contact modal *(if detected)*, hamburger menu *(if detected)* |
 | Console & Network | 17.x - 18.x | No JS errors (excluding known CORS), no failed network requests |
 
 ## 1.2 CSS Extraction via `getComputedStyle()`
